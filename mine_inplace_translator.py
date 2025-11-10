@@ -707,6 +707,143 @@ def is_empty_or_whitespace(text: str) -> bool:
     return not text or text.isspace()
 
 
+# ============================================================================
+# CONTEXT-AWARE DETECTION (NEW - Smart code vs text detection)
+# ============================================================================
+
+# YAML keys that indicate CODE context (technical values that should NOT be translated)
+CODE_CONTEXT_KEYS = {
+    # Identifiers
+    'id', 'key', 'name', 'type', 'class', 'uuid', 'guid',
+    # Permissions & commands
+    'permission', 'permissions', 'perm', 'perms', 'node', 'command', 'cmd', 'alias', 'aliases',
+    # Technical
+    'namespace', 'plugin', 'world', 'biome', 'enchantment', 'potion', 'effect',
+    # Configuration
+    'enabled', 'disabled', 'mode', 'format', 'pattern', 'regex',
+    # Paths & URLs
+    'path', 'file', 'folder', 'directory', 'url', 'link', 'website',
+    # Database & API
+    'table', 'column', 'field', 'database', 'api', 'endpoint',
+    # Minecraft specific
+    'material', 'item', 'block', 'entity', 'sound', 'particle',
+}
+
+# YAML keys that indicate NATURAL LANGUAGE context (should be translated)
+TEXT_CONTEXT_KEYS = {
+    # User-facing text
+    'message', 'messages', 'msg', 'text', 'description', 'desc',
+    'title', 'subtitle', 'actionbar', 'chat', 'lore', 'tooltip',
+    # Help & info
+    'help', 'usage', 'info', 'about', 'tutorial', 'guide',
+    # Feedback
+    'success', 'error', 'warning', 'fail', 'denied', 'invalid',
+    # Content
+    'content', 'body', 'display', 'label', 'placeholder',
+}
+
+
+def is_code_context(path: str) -> bool:
+    """
+    Check if YAML path indicates code/technical context (should NOT translate).
+
+    Examples:
+        - "permission" → True (code context)
+        - "config.command.teleport" → True (code context)
+        - "messages.welcome" → False (text context)
+        - "descriptions.item_sword" → False (text context)
+    """
+    if not path:
+        return False
+
+    # Split path and check last key (most specific)
+    parts = path.lower().split('.')
+    last_key = parts[-1] if parts else ""
+
+    # Check if last key is in code context list
+    if last_key in CODE_CONTEXT_KEYS:
+        return True
+
+    # Check if any part contains code keywords
+    for part in parts:
+        if part in CODE_CONTEXT_KEYS:
+            return True
+
+    # If explicitly in text context, return False
+    if last_key in TEXT_CONTEXT_KEYS:
+        return False
+
+    return False
+
+
+def looks_like_code(text: str) -> bool:
+    """
+    Check if text looks like code/technical string (should NOT translate).
+
+    Detects:
+        - Permission nodes: "player.admin.teleport"
+        - Namespace IDs: "minecraft:diamond_sword"
+        - Commands: "/spawn", "/teleport"
+        - Paths: "plugins/MyPlugin/config.yml"
+        - Single words without spaces: "teleport", "admin"
+        - Technical patterns: "camelCase", "snake_case", "kebab-case"
+    """
+    if not text or len(text.strip()) == 0:
+        return False
+
+    text = text.strip()
+
+    # Already protected by TokenProtector (has placeholders, color codes, etc.)
+    if any(char in text for char in ['%', '{', '}', '&', '§']):
+        return False  # Let normal protection handle it
+
+    # Permission node pattern: "group.subgroup.permission"
+    if re.match(r'^[a-z][a-z0-9]*(\.[a-z][a-z0-9_-]*){2,}$', text, re.IGNORECASE):
+        return True
+
+    # Namespace ID: "minecraft:item", "myserver:custom_item"
+    if re.match(r'^[a-z0-9_-]+:[a-z0-9_/-]+$', text, re.IGNORECASE):
+        return True
+
+    # Command pattern: starts with /
+    if text.startswith('/'):
+        return True
+
+    # File path pattern: contains / or \ with extension
+    if ('/' in text or '\\' in text) and '.' in text:
+        return True
+
+    # Single technical word (no spaces, contains underscores or hyphens)
+    if ' ' not in text and len(text) > 3:
+        # Has underscores or hyphens (technical naming)
+        if '_' in text or '-' in text:
+            return True
+
+        # camelCase or PascalCase (but not all caps)
+        if re.search(r'[a-z][A-Z]', text):
+            return True
+
+    # All uppercase acronym (but not just "I" or "A")
+    if text.isupper() and len(text) >= 3 and text.isalpha():
+        return True
+
+    # Looks like natural language (has common words, articles, verbs)
+    natural_indicators = ['the', 'a', 'an', 'is', 'are', 'you', 'your', 'this', 'that',
+                          'have', 'has', 'will', 'can', 'please', 'welcome', 'hello']
+    words = text.lower().split()
+    if any(word in natural_indicators for word in words):
+        return False  # Definitely natural language
+
+    # Short text without spaces (likely technical)
+    if ' ' not in text and len(text) <= 15:
+        # But not if it's just one common English word
+        common_words = ['yes', 'no', 'true', 'false', 'enabled', 'disabled', 'on', 'off']
+        if text.lower() not in common_words:
+            return True
+
+    return False
+
+
 def load_glossary(glossary_path: Optional[Path]) -> Dict[str, str]:
     """Load glossary JSON file (en -> vi mapping)."""
     if not glossary_path or not glossary_path.exists():
@@ -1679,15 +1816,23 @@ class YAMLHandler(FileHandler):
                         pass  # Ignore if still can't delete
 
     def translate_value(self, value: Any, path: str) -> Tuple[Any, bool, str]:
-        """Translate a single value.
+        """Translate a single value with context-aware detection.
 
         Returns:
             (translated_value, changed, reason)
         """
+        # CONTEXT-AWARE CHECK: Skip if YAML key indicates code context
+        if is_code_context(path):
+            return value, False, f"code_context: {path}"
+
         # BUGFIX: Check literal/folded scalars BEFORE str
         # (LiteralScalarString/FoldedScalarString inherit from str)
         if isinstance(value, (LiteralScalarString, FoldedScalarString)):
             original_text = str(value)
+
+            # CONTEXT-AWARE CHECK: Skip if text looks like code
+            if looks_like_code(original_text):
+                return value, False, f"looks_like_code: {original_text[:50]}"
 
             # Check if should skip
             if len(original_text) <= YAML_MULTILINE_THRESHOLD:
@@ -1731,6 +1876,10 @@ class YAMLHandler(FileHandler):
 
         # Handle regular scalar strings (AFTER checking LiteralScalarString/FoldedScalarString)
         if isinstance(value, str):
+            # CONTEXT-AWARE CHECK: Skip if text looks like code
+            if looks_like_code(value):
+                return value, False, f"looks_like_code: {value[:50]}"
+
             translated, reason = self.translator.translate_single(value)
             changed = translated != value
             return translated, changed, reason

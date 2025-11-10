@@ -1,0 +1,181 @@
+# ============================================================================
+# CONTEXT-AWARE TRANSLATION TEST
+# This file tests smart detection of code vs natural language
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# 1. PERMISSIONS (Should NOT be translated - code context)
+# ----------------------------------------------------------------------------
+permissions:
+  admin:
+    node: "server.admin.all"  # ❌ Don't translate - permission node
+    description: "Grants full admin access to the server"  # ✅ Translate - natural language
+
+  moderator:
+    node: "server.moderator.basic"  # ❌ Don't translate
+    description: "Allows moderator to manage players"  # ✅ Translate
+
+  vip:
+    permission: "server.vip.benefits"  # ❌ Don't translate
+    display: "VIP Member"  # ✅ Translate
+
+# ----------------------------------------------------------------------------
+# 2. COMMANDS (Should NOT be translated - code context)
+# ----------------------------------------------------------------------------
+commands:
+  teleport:
+    command: "/tp"  # ❌ Don't translate - command
+    alias: "/teleport"  # ❌ Don't translate - alias
+    usage: "Use /tp <player> to teleport"  # ✅ Translate (but keep /tp)
+    description: "Teleport to another player"  # ✅ Translate
+
+  spawn:
+    cmd: "/spawn"  # ❌ Don't translate
+    help: "Returns you to spawn point"  # ✅ Translate
+
+# ----------------------------------------------------------------------------
+# 3. MESSAGES (Should be translated - text context)
+# ----------------------------------------------------------------------------
+messages:
+  welcome: "Welcome to our server! Enjoy your stay."  # ✅ Translate
+  goodbye: "Thanks for playing! See you soon."  # ✅ Translate
+  join: "&6[+] &7{player} has joined the server"  # ✅ Translate (keep placeholders & colors)
+  quit: "&6[-] &7{player} has left the server"  # ✅ Translate
+
+  errors:
+    no_permission: "&cYou don't have permission to do that!"  # ✅ Translate
+    invalid_command: "&cInvalid command. Type /help for help."  # ✅ Translate (keep /help)
+    player_not_found: "&cPlayer {player} is not online"  # ✅ Translate
+
+# ----------------------------------------------------------------------------
+# 4. MIXED CONTEXT - Keys determine behavior
+# ----------------------------------------------------------------------------
+items:
+  diamond_sword:
+    id: "minecraft:diamond_sword"  # ❌ Don't translate - namespace ID
+    material: "DIAMOND_SWORD"  # ❌ Don't translate - enum/material
+    name: "&b&lLegendary Blade"  # ✅ Translate - display name
+    lore:  # ✅ Translate - item description
+      - "&7A powerful sword forged"
+      - "&7from the finest diamonds"
+      - "&eRight-click to activate special ability"
+    enchantment: "sharpness:5"  # ❌ Don't translate - technical
+
+  health_potion:
+    type: "POTION"  # ❌ Don't translate - type enum
+    effect: "regeneration:2:30"  # ❌ Don't translate - effect format
+    title: "Potion of Healing"  # ✅ Translate
+    description: "Restores 4 hearts instantly"  # ✅ Translate
+
+# ----------------------------------------------------------------------------
+# 5. TECHNICAL VALUES (Should NOT be translated)
+# ----------------------------------------------------------------------------
+config:
+  plugin: "MyAwesomePlugin"  # ❌ Don't translate - plugin name
+  version: "1.0.0"  # ❌ Don't translate - version
+  enabled: true  # ❌ Don't translate - boolean
+  mode: "survival"  # ❌ Might not translate - technical mode
+  world: "world_nether"  # ❌ Don't translate - world name
+
+  database:
+    type: "MySQL"  # ❌ Don't translate
+    table: "player_data"  # ❌ Don't translate
+    column: "uuid"  # ❌ Don't translate
+
+  paths:
+    file: "plugins/MyPlugin/data.yml"  # ❌ Don't translate - file path
+    folder: "plugins/MyPlugin/backups"  # ❌ Don't translate - folder path
+    url: "https://example.com/api"  # ❌ Don't translate - URL
+
+# ----------------------------------------------------------------------------
+# 6. USER-FACING TEXT (Should be translated)
+# ----------------------------------------------------------------------------
+gui:
+  inventory:
+    title: "Server Shop"  # ✅ Translate
+    subtitle: "Buy items with coins"  # ✅ Translate
+
+  buttons:
+    buy:
+      display: "&aBuy Item"  # ✅ Translate
+      tooltip: "Click to purchase this item"  # ✅ Translate
+    sell:
+      label: "&cSell Item"  # ✅ Translate
+      info: "Right-click to sell"  # ✅ Translate
+
+# ----------------------------------------------------------------------------
+# 7. LOOKS_LIKE_CODE DETECTION (Value-based detection)
+# ----------------------------------------------------------------------------
+values:
+  permission_node: "player.admin.teleport"  # ❌ Don't translate - permission pattern
+  namespace_id: "minecraft:diamond_sword"  # ❌ Don't translate - namespace pattern
+  command_value: "/spawn"  # ❌ Don't translate - starts with /
+  file_path: "plugins/MyPlugin/config.yml"  # ❌ Don't translate - file path
+  camel_case: "playerInventoryHandler"  # ❌ Don't translate - camelCase
+  snake_case: "player_data_manager"  # ❌ Don't translate - snake_case
+  uppercase_constant: "MAX_PLAYERS"  # ❌ Don't translate - uppercase acronym
+
+  natural_text: "Welcome to the server"  # ✅ Translate - has "the"
+  sentence: "You have joined the game"  # ✅ Translate - has "you", "have"
+  friendly_message: "Hello, please enjoy your stay!"  # ✅ Translate - has "please", "your"
+
+# ----------------------------------------------------------------------------
+# 8. EDGE CASES
+# ----------------------------------------------------------------------------
+edge_cases:
+  # Natural language in 'name' key (usually code, but has natural indicators)
+  name: "The Ultimate Sword of Power"  # ✅ Translate - has "the", "of"
+
+  # Technical in 'message' key (usually text, but looks like code)
+  message: "player.stats.handler"  # ❌ Don't translate - looks like permission node
+
+  # Mixed: Natural sentence with technical terms
+  tutorial: "Use /spawn command to teleport home"  # ✅ Translate (keep /spawn)
+
+  # Short ambiguous
+  key: "teleport"  # ❌ Don't translate - single word without spaces
+  text: "hello world"  # ✅ Translate - two words with space
+
+# ----------------------------------------------------------------------------
+# 9. REAL-WORLD MINECRAFT CONFIG EXAMPLE
+# ----------------------------------------------------------------------------
+ranks:
+  vip:
+    permission: "rank.vip"  # ❌ Don't translate
+    display_name: "&6[VIP] {player}"  # ✅ Translate text, keep placeholder & color
+    chat_format: "&6[VIP]&r {player}&7: &f{message}"  # ✅ Translate, keep placeholders
+
+    perks_description: |  # ✅ Translate - multiline natural language
+      VIP Benefits:
+      - Access to /fly command
+      - Double XP rewards
+      - Exclusive VIP lounge
+      - Priority server queue
+
+    commands:  # ❌ Don't translate - command list
+      - "/fly"
+      - "/hat"
+      - "/nickname"
+
+# ----------------------------------------------------------------------------
+# 10. PLUGIN INTEGRATION EXAMPLE
+# ----------------------------------------------------------------------------
+essentials:
+  motd:  # Message of the day - ✅ Translate
+    line1: "&6&l▬▬▬▬▬▬▬▬▬▬▬ &e&lWELCOME &6&l▬▬▬▬▬▬▬▬▬▬▬"
+    line2: "&7Thanks for joining our server!"
+    line3: "&7Type &e/help &7for a list of commands"
+    line4: "&7Visit our website: &bexample.com"
+
+  kits:
+    starter:
+      permission: "essentials.kit.starter"  # ❌ Don't translate
+      description: "Starting kit for new players"  # ✅ Translate
+      items:  # ❌ Don't translate - technical item IDs
+        - "minecraft:stone_sword:1"
+        - "minecraft:bread:10"
+        - "minecraft:leather_chestplate:1"
+
+    vip:
+      perm: "essentials.kit.vip"  # ❌ Don't translate
+      text: "VIP exclusive starter kit"  # ✅ Translate
