@@ -1247,15 +1247,224 @@ class ModelLoader:
 
 
 # ============================================================================
+# TRANSLATION MEMORY (Cache system)
+# ============================================================================
+
+import sqlite3
+import hashlib
+from datetime import datetime
+
+
+class TranslationMemory:
+    """
+    SQLite-based translation cache to avoid re-translating identical text.
+
+    Benefits:
+    - Speeds up translation (cache hit = instant)
+    - Ensures consistency across files
+    - Persists between runs
+    """
+
+    def __init__(self, db_path: Optional[Path] = None, enabled: bool = True):
+        self.enabled = enabled
+        if not enabled:
+            self.db = None
+            return
+
+        # Default path: ~/.cache/minecraft_translator/tm.db
+        if db_path is None:
+            cache_dir = Path.home() / ".cache" / "minecraft_translator"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            db_path = cache_dir / "tm.db"
+
+        self.db_path = db_path
+        self.db = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.db.execute("PRAGMA journal_mode=WAL")  # Better concurrency
+        self.create_table()
+
+        # Statistics
+        self.hits = 0
+        self.misses = 0
+        self.total_queries = 0
+
+    def create_table(self):
+        """Create translation memory table if not exists."""
+        if not self.db:
+            return
+
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS translations (
+                source_hash TEXT PRIMARY KEY,
+                source_text TEXT NOT NULL,
+                target_text TEXT NOT NULL,
+                context TEXT,
+                model_name TEXT,
+                created_at INTEGER,
+                last_used INTEGER,
+                use_count INTEGER DEFAULT 1
+            )
+        """)
+
+        # Index for faster lookups
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_context
+            ON translations(context)
+        """)
+
+        self.db.commit()
+
+    def _hash_source(self, source: str, context: str = None) -> str:
+        """Generate hash for source text + context."""
+        key = f"{source}|{context or ''}"
+        return hashlib.sha256(key.encode('utf-8')).hexdigest()
+
+    def get(self, source: str, context: str = None, model_name: str = None) -> Optional[str]:
+        """
+        Lookup translation from cache.
+
+        Args:
+            source: Source text
+            context: YAML path or file context
+            model_name: Model name (optional filter)
+
+        Returns:
+            Cached translation or None
+        """
+        if not self.enabled or not self.db:
+            return None
+
+        self.total_queries += 1
+        source_hash = self._hash_source(source, context)
+
+        try:
+            cursor = self.db.execute("""
+                SELECT target_text, use_count
+                FROM translations
+                WHERE source_hash = ?
+                AND (model_name = ? OR ? IS NULL)
+                LIMIT 1
+            """, (source_hash, model_name, model_name))
+
+            row = cursor.fetchone()
+            if row:
+                target_text, use_count = row
+
+                # Update statistics
+                self.db.execute("""
+                    UPDATE translations
+                    SET last_used = ?, use_count = ?
+                    WHERE source_hash = ?
+                """, (int(datetime.now().timestamp()), use_count + 1, source_hash))
+                self.db.commit()
+
+                self.hits += 1
+                return target_text
+
+            self.misses += 1
+            return None
+
+        except Exception as e:
+            print(f"⚠️ TM lookup error: {e}")
+            return None
+
+    def put(self, source: str, target: str, context: str = None, model_name: str = None):
+        """
+        Store translation in cache.
+
+        Args:
+            source: Source text
+            target: Translated text
+            context: YAML path or file context
+            model_name: Model name used
+        """
+        if not self.enabled or not self.db:
+            return
+
+        source_hash = self._hash_source(source, context)
+        now = int(datetime.now().timestamp())
+
+        try:
+            self.db.execute("""
+                INSERT OR REPLACE INTO translations
+                (source_hash, source_text, target_text, context, model_name, created_at, last_used, use_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT use_count FROM translations WHERE source_hash = ?), 1))
+            """, (source_hash, source, target, context, model_name, now, now, source_hash))
+            self.db.commit()
+
+        except Exception as e:
+            print(f"⚠️ TM store error: {e}")
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        if not self.enabled or not self.db:
+            return {
+                "enabled": False,
+                "hits": 0,
+                "misses": 0,
+                "total": 0,
+                "hit_rate": 0.0,
+                "cache_size": 0
+            }
+
+        try:
+            cursor = self.db.execute("SELECT COUNT(*) FROM translations")
+            cache_size = cursor.fetchone()[0]
+
+            hit_rate = self.hits / self.total_queries if self.total_queries > 0 else 0.0
+
+            return {
+                "enabled": True,
+                "hits": self.hits,
+                "misses": self.misses,
+                "total": self.total_queries,
+                "hit_rate": hit_rate,
+                "cache_size": cache_size,
+                "db_path": str(self.db_path)
+            }
+
+        except Exception:
+            return {
+                "enabled": True,
+                "hits": self.hits,
+                "misses": self.misses,
+                "total": self.total_queries,
+                "hit_rate": 0.0,
+                "cache_size": 0
+            }
+
+    def clear(self):
+        """Clear all cached translations."""
+        if not self.enabled or not self.db:
+            return
+
+        try:
+            self.db.execute("DELETE FROM translations")
+            self.db.commit()
+            print("✅ Translation memory cleared")
+        except Exception as e:
+            print(f"⚠️ Failed to clear TM: {e}")
+
+    def close(self):
+        """Close database connection."""
+        if self.db:
+            self.db.close()
+
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.close()
+
+
+# ============================================================================
 # TRANSLATOR
 # ============================================================================
 
 class Translator:
-    """Main translation engine."""
+    """Main translation engine with Translation Memory cache."""
 
     def __init__(self, model_loader: ModelLoader, batch_size: int,
                  low_memory: bool = False, glossary: Optional[Dict[str, str]] = None,
-                 force: bool = False):
+                 force: bool = False, tm: Optional[TranslationMemory] = None):
         self.model_loader = model_loader
         self.batch_size = batch_size
         self.low_memory = low_memory
@@ -1263,6 +1472,7 @@ class Translator:
         self.force = force
         self.protector = TokenProtector()
         self.on_translation = None  # Callback for each translation
+        self.tm = tm  # Translation Memory cache
 
         # Choose delimiters
         self.delim_rec = DELIMITER_REC
@@ -1425,8 +1635,8 @@ class Translator:
 
         return all_results
 
-    def translate_single(self, text: str) -> Tuple[str, str]:
-        """Translate a single text with protection and validation.
+    def translate_single(self, text: str, context: str = None) -> Tuple[str, str]:
+        """Translate a single text with protection, validation, and cache.
 
         Returns:
             (translated_text, reason_if_failed)
@@ -1435,6 +1645,13 @@ class Translator:
         skip, reason = self.should_skip(text)
         if skip:
             return text, reason
+
+        # CACHE LOOKUP: Check Translation Memory first
+        if self.tm and self.tm.enabled:
+            cached = self.tm.get(text, context=context, model_name=self.model_loader.actual_model_name)
+            if cached:
+                # Cache hit! Return immediately
+                return cached, ""
 
         # Language detection - skip non-English/Vietnamese text
         if LANGDETECT_AVAILABLE:
@@ -1528,6 +1745,10 @@ class Translator:
                 print(f"   Translated: {encoded[:100]}...")
                 # FIXED: Don't reject - just log warning
                 # return text, f"structure_invalid: {struct_error}"
+
+        # CACHE STORE: Save successful translation to Translation Memory
+        if self.tm and self.tm.enabled:
+            self.tm.put(text, encoded, context=context, model_name=self.model_loader.actual_model_name)
 
         return encoded, ""
 
@@ -1837,7 +2058,7 @@ class YAMLHandler(FileHandler):
             # Check if should skip
             if len(original_text) <= YAML_MULTILINE_THRESHOLD:
                 # Translate as single block
-                translated, reason = self.translator.translate_single(original_text)
+                translated, reason = self.translator.translate_single(original_text, context=path)
                 if reason:
                     return value, False, reason
 
@@ -1860,7 +2081,7 @@ class YAMLHandler(FileHandler):
                         continue
 
                     # BUGFIX: Removed unused prev_line variable
-                    translated, reason = self.translator.translate_single(line)
+                    translated, reason = self.translator.translate_single(line, context=f"{path}[line]")
                     translated_lines.append(translated if not reason else line)
 
                 translated_text = "\n".join(translated_lines)
@@ -1880,7 +2101,7 @@ class YAMLHandler(FileHandler):
             if looks_like_code(value):
                 return value, False, f"looks_like_code: {value[:50]}"
 
-            translated, reason = self.translator.translate_single(value)
+            translated, reason = self.translator.translate_single(value, context=path)
             changed = translated != value
             return translated, changed, reason
 
@@ -2004,7 +2225,7 @@ class JSONHandler(FileHandler):
                 if isinstance(value, (dict, list)):
                     changes_count += self.translate_recursive(value, current_path)
                 elif isinstance(value, str):
-                    translated, reason = self.translator.translate_single(value)
+                    translated, reason = self.translator.translate_single(value, context=current_path)
                     if translated != value:
                         data[key] = translated
                         changes_count += 1
@@ -2026,7 +2247,7 @@ class JSONHandler(FileHandler):
                 if isinstance(item, (dict, list)):
                     changes_count += self.translate_recursive(item, current_path)
                 elif isinstance(item, str):
-                    translated, reason = self.translator.translate_single(item)
+                    translated, reason = self.translator.translate_single(item, context=current_path)
                     if translated != item:
                         data[i] = translated
                         changes_count += 1
@@ -2125,7 +2346,7 @@ class PropertiesHandler(FileHandler):
                         continue
 
                 # Translate value only
-                translated, reason = self.translator.translate_single(value)
+                translated, reason = self.translator.translate_single(value, context=key.strip())
                 if translated != value:
                     # BUGFIX: Preserve full separator with spacing
                     new_line = f"{key}{full_separator}{translated}\n"
@@ -2243,6 +2464,14 @@ class InPlaceTranslator:
         if glossary:
             print(f"Loaded glossary with {len(glossary)} terms")
 
+        # Initialize Translation Memory (cache)
+        tm_enabled = not self.args.no_cache
+        tm = TranslationMemory(enabled=tm_enabled) if tm_enabled else None
+        if tm_enabled:
+            stats = tm.get_stats()
+            print(f"Translation Memory enabled: {stats['cache_size']} cached translations")
+            print(f"  Cache database: {stats.get('db_path', 'N/A')}")
+
         # Create translator
         self.translator = Translator(
             model_loader=self.model_loader,
@@ -2250,6 +2479,7 @@ class InPlaceTranslator:
             low_memory=self.args.low_memory,
             glossary=glossary,
             force=self.args.force,
+            tm=tm,
         )
 
         # Propagate callbacks to translator
@@ -2470,6 +2700,18 @@ class InPlaceTranslator:
             print("\n[WARN] DRY-RUN MODE: No files will be modified")
 
         self.process_files()
+
+        # Print Translation Memory statistics
+        if self.translator and self.translator.tm:
+            stats = self.translator.tm.get_stats()
+            if stats['total'] > 0:
+                print("\n" + "="*60)
+                print("TRANSLATION MEMORY STATISTICS")
+                print("="*60)
+                print(f"Cache hits:   {stats['hits']}/{stats['total']} ({stats['hit_rate']:.1%})")
+                print(f"Cache size:   {stats['cache_size']} translations")
+                print(f"Time saved:   ~{stats['hits'] * 2:.0f}s (estimated)")
+                print(f"Database:     {stats.get('db_path', 'N/A')}")
 
         print("\n" + "="*60)
         print("COMPLETE")
@@ -5019,12 +5261,35 @@ Examples:
     parser.add_argument("--self-test", action="store_true", help="Run internal validation tests")
     parser.add_argument("--max-memory", help='Cap memory usage (e.g., "cuda:0=7GiB,cpu=30GiB")')
     parser.add_argument("--glossary", help="Path to glossary JSON file (en->vi)")
+    parser.add_argument("--no-cache", action="store_true", help="Disable translation memory cache")
+    parser.add_argument("--clear-cache", action="store_true", help="Clear translation memory cache and exit")
+    parser.add_argument("--cache-stats", action="store_true", help="Show cache statistics and exit")
 
     args = parser.parse_args()
 
     # Self-test mode
     if args.self_test:
         run_self_tests()
+        return
+
+    # Cache management modes
+    if args.clear_cache:
+        tm = TranslationMemory()
+        tm.clear()
+        stats = tm.get_stats()
+        print(f"📊 Cache cleared. Database: {stats.get('db_path', 'N/A')}")
+        return
+
+    if args.cache_stats:
+        tm = TranslationMemory()
+        stats = tm.get_stats()
+        print("\n📊 TRANSLATION MEMORY STATISTICS")
+        print("=" * 60)
+        print(f"Status:     {'✅ Enabled' if stats['enabled'] else '❌ Disabled'}")
+        print(f"Cache size: {stats['cache_size']} translations")
+        print(f"Hit rate:   {stats['hit_rate']:.1%} ({stats['hits']} hits / {stats['total']} queries)")
+        print(f"Database:   {stats.get('db_path', 'N/A')}")
+        print("=" * 60)
         return
 
     # Validate folder requirement

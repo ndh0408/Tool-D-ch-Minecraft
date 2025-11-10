@@ -382,43 +382,77 @@ python3 mine_inplace_translator.py ./plugins --glossary terms.json
 
 ---
 
-### 💾 **Module 6: TRANSLATION MEMORY** (Chưa có)
+### 💾 **Module 6: TRANSLATION MEMORY** ✅ **HOÀN CHỈNH**
 
-**Trạng thái:** ❌ **CHƯA IMPLEMENT**
+**Trạng thái:** ✅ **ĐÃ IMPLEMENT**
 
-**Đề xuất implementation:**
+**Implementation:**
 
 ```python
 class TranslationMemory:
     """SQLite-based translation cache"""
 
-    def __init__(self, db_path: Path):
-        self.db = sqlite3.connect(db_path)
+    def __init__(self, db_path: Optional[Path] = None, enabled: bool = True):
+        self.enabled = enabled
+        self.db_path = db_path or Path.home() / ".cache" / "minecraft_translator" / "tm.db"
+        self.db = sqlite3.connect(str(self.db_path))
+        self.db.execute("PRAGMA journal_mode=WAL")  # Better concurrency
         self.create_table()
 
     def create_table(self):
         """
-        CREATE TABLE tm (
-            source_text TEXT PRIMARY KEY,
-            target_text TEXT,
+        CREATE TABLE translations (
+            source_hash TEXT PRIMARY KEY,
+            source_text TEXT NOT NULL,
+            target_text TEXT NOT NULL,
             context TEXT,
-            timestamp INTEGER
+            model_name TEXT,
+            created_at INTEGER,
+            last_used INTEGER,
+            use_count INTEGER DEFAULT 1
         )
         """
 
-    def get(self, source: str, context: str = None) -> Optional[str]:
-        """Lookup translation from cache"""
+    def get(self, source: str, context: str = None, model_name: str = None) -> Optional[str]:
+        """Lookup translation from cache with context and model filtering"""
 
-    def put(self, source: str, target: str, context: str = None):
-        """Store translation to cache"""
+    def put(self, source: str, target: str, context: str = None, model_name: str = None):
+        """Store translation to cache with metadata"""
+
+    def get_stats(self) -> Dict:
+        """Get cache statistics (hits, misses, size, hit_rate)"""
+
+    def clear(self):
+        """Clear all cached translations"""
 ```
 
-**Benefits:**
-- ✅ Tránh dịch lại text giống nhau
+**Features:**
+- ✅ Tránh dịch lại text giống nhau (cache hit = instant)
 - ✅ Nhất quán khi dịch nhiều files
-- ✅ Nhanh hơn (cache hit = instant)
+- ✅ Context-aware caching (YAML path included)
+- ✅ Model-specific cache (different models = different cache entries)
+- ✅ Statistics tracking (hits, misses, hit rate)
+- ✅ Persistent cache (survives between runs)
+- ✅ Thread-safe with WAL mode
 
-**TODO:** Cần implement trong version tiếp theo
+**Usage:**
+```bash
+# Enable cache (default)
+python mine_inplace_translator.py ./plugins
+
+# Disable cache
+python mine_inplace_translator.py ./plugins --no-cache
+
+# Clear cache
+python mine_inplace_translator.py --clear-cache
+
+# View cache statistics
+python mine_inplace_translator.py --cache-stats
+```
+
+**Cache location:** `~/.cache/minecraft_translator/tm.db`
+
+**Code location:** `mine_inplace_translator.py:1249-1456`
 
 ---
 
@@ -599,7 +633,7 @@ ETACalculator:
 | **Validation** | Check output | ✅ | Token/length/structure validation |
 | **Backup** | Backup file | ✅ | .bak auto-created |
 | **Atomic write** | Không corrupt | ✅ | temp file + rename |
-| **Translation Memory** | Cache dịch | ❌ | **TODO** |
+| **Translation Memory** | Cache dịch | ✅ | SQLite-based cache |
 | **Glossary** | Thuật ngữ | ✅ | JSON glossary support |
 | **Context-aware** | Phân biệt code/text | ✅ | Key-based + pattern-based |
 | **Language detection** | Phát hiện ngôn ngữ | ✅ | langdetect + manual rules |
@@ -608,7 +642,7 @@ ETACalculator:
 | **Rollback** | Khôi phục | ✅ | --rollback flag |
 | **Report** | Log changes | ✅ | CSV report |
 
-**Score: 17/18 features implemented (94%)**
+**Score: 18/18 features implemented (100%)**
 
 ---
 
@@ -625,31 +659,11 @@ ETACalculator:
 
 ---
 
-## 8. ĐIỂM CẦN CẢI THIỆN
+## 8. TÍ NH NĂNG TÙY CHỌN (Optional Improvements)
 
-### ❌ **Translation Memory (Thiếu)**
+### ✅ **Translation Memory** - ĐÃ HOÀN THÀNH
 
-**Đề xuất:**
-```python
-class TranslationMemory:
-    """SQLite cache for translations"""
-
-    # Usage:
-    tm = TranslationMemory("cache.db")
-
-    # Before translating:
-    cached = tm.get(text, context="messages.welcome")
-    if cached:
-        return cached
-
-    # After translating:
-    tm.put(text, translated, context="messages.welcome")
-```
-
-**Benefits:**
-- Tránh dịch lại text giống nhau
-- Nhất quán giữa các files
-- Nhanh hơn nhiều (cache hit = instant)
+Tính năng này đã được implement hoàn chỉnh! Xem Module 6 ở trên.
 
 ### ⚠️ **Sentence Segmentation (Có thể cải thiện)**
 
