@@ -1,0 +1,9 @@
+# Test .txt file for line-by-line translation
+# Comments should not be translated
+
+Welcome to the server!
+Please read the rules carefully.
+Have fun and enjoy your stay.
+
+# Another comment
+Thank you for playing on our server.
