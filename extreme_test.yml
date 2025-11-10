@@ -1,0 +1,200 @@
+# EXTREME TRANSLATION TEST FILE
+# Tests all edge cases that commonly cause translation failures
+
+# ============================================================================
+# 1. APOSTROPHES & POSSESSIVES (Vietnamese doesn't use apostrophes)
+# ============================================================================
+apostrophe_tests:
+  simple_contraction: "It's a beautiful day!"
+  possessive_singular: "The player's inventory is full."
+  possessive_plural: "All players' items will be saved."
+  multiple_apostrophes: "It's the members' choice, and they're happy about it."
+  complex_sentence: "John's team won, but Mary's team didn't lose hope."
+
+# ============================================================================
+# 2. QUOTES & NESTED QUOTES (Structure validation test)
+# ============================================================================
+quote_tests:
+  double_quotes: 'He said "Hello world" to everyone.'
+  single_quotes: "It's a 'wonderful' experience!"
+  mixed_quotes: "She replied: 'I don't think so' and left."
+  nested_complex: 'The message was "You\'re welcome" he said.'
+
+# ============================================================================
+# 3. SHORT TEXT (Language detection false positives)
+# ============================================================================
+short_text_tests:
+  very_short: "Ban"
+  short_phrase: "Can you help?"
+  short_sentence: "Join now"
+  ambiguous: "Co op mode"
+
+# ============================================================================
+# 4. PLACEHOLDERS (Must be preserved exactly)
+# ============================================================================
+placeholder_tests:
+  simple: "Welcome %player%!"
+  multiple: "You have %count% items in %location%"
+  curly_braces: "Hello {player}, you have {balance} coins"
+  numbered: "Error code: {0} at {1}"
+  complex: "%vault_eco_balance(player)_formatted%"
+  conditional: "%if_has_permission%You are VIP%else%You are normal%endif%"
+  math_expression: "Your level is %{player_level * 100}%%"
+  mixed: "Player %player% has {count} items worth ${amount}"
+
+# ============================================================================
+# 5. MINIMESSAGE TAGS (Minecraft formatting)
+# ============================================================================
+minimessage_tests:
+  color: "<red>This is red text</red>"
+  gradient: "<gradient:red:blue>Rainbow text</gradient>"
+  click: "<click:run_command:/spawn>Click here to spawn</click>"
+  hover: "<hover:show_text:'Hover info'>Hover me</hover>"
+  complex: "<red><bold>WARNING</bold></red> <gray>Server restarting in <yellow>%time%</yellow> seconds</gray>"
+
+# ============================================================================
+# 6. COLOR CODES (Legacy Minecraft)
+# ============================================================================
+color_codes_tests:
+  ampersand: "&cRed &aGreen &9Blue &fWhite"
+  section: "§cRed §aGreen §9Blue §fWhite"
+  formatting: "&l&nBold Underline &r&oItalic"
+  mixed_with_text: "&6[&eVIP&6] &7Player joined the server"
+
+# ============================================================================
+# 7. MULTILINE TEXT (Newline preservation test)
+# ============================================================================
+multiline_tests:
+  simple_multiline: |
+    Welcome to the server!
+    Please read the rules.
+    Have fun!
+  complex_multiline: |
+    Server Rules:
+    1. Don't grief other players' builds
+    2. Be respectful - no hate speech
+    3. Don't spam chat
+    4. Report bugs to staff
+  folded_text: >
+    This is a very long text that should be folded
+    into a single line but it's written across multiple
+    lines in the YAML file for readability.
+
+# ============================================================================
+# 8. MIXED VIETNAMESE TEXT (Should skip these)
+# ============================================================================
+vietnamese_tests:
+  full_vietnamese: "Chào mừng bạn đến với máy chủ của chúng tôi!"
+  mixed_content: "Welcome to server - Chào mừng bạn đã tham gia"
+  vietnamese_with_placeholder: "Xin chào %player%, bạn có %count% vật phẩm"
+
+# ============================================================================
+# 9. SPECIAL CHARACTERS & SYMBOLS
+# ============================================================================
+special_chars:
+  brackets: "[INFO] Player joined [VIP]"
+  braces: "{\"status\": \"success\", \"message\": \"Complete\"}"
+  pipes: "Option A | Option B | Option C"
+  arrows: "Click here -> [Button] <- to continue"
+  math: "Cost: $50 + 10% tax = $55"
+  unicode: "★ VIP ★ | ♦ Premium ♦ | ♠ Elite ♠"
+
+# ============================================================================
+# 10. COMPLEX REAL-WORLD EXAMPLES
+# ============================================================================
+real_world_examples:
+  permission_message: "&c[Permission] &7You don't have &e%required_permission% &7to use this command!"
+
+  economy_message: |
+    &6━━━━━━━━ &e&lBANK STATEMENT &6━━━━━━━━
+    &7Balance: &a${balance}
+    &7Daily limit: &e${daily_limit}
+    &7Next reset: %vault_eco_timer%
+
+  shop_item: "<gradient:yellow:gold>Legendary Sword</gradient> <gray>- Click to buy for <green>$%price%</green></gray>"
+
+  chat_format: "&8[&b%player_rank%&8] &f%player_name%&7: &r%message%"
+
+  quest_description: >
+    Quest: &eDefeat the Dragon
+
+    Objectives:
+    - Find the dragon's lair (0/1)
+    - Collect dragon scales (5/10)
+    - Return to village chief
+
+    Rewards: &6%quest_reward_gold% gold, &d%quest_reward_xp% XP
+
+  error_with_code: "An error occurred while processing your request. Error: {error_code} - '{error_message}'"
+
+# ============================================================================
+# 11. EDGE CASES THAT COMMONLY FAIL
+# ============================================================================
+edge_cases:
+  url: "Visit our website: https://example.com/server"
+  email: "Contact admin@server.com for support"
+  ip_address: "Server IP: 192.168.1.1:25565"
+  version: "Requires Minecraft v1.19.4 or higher"
+  permission_node: "player.admin.teleport.others"
+  namespace: "minecraft:diamond_sword"
+
+  # This often gets detected as Romanian/French incorrectly
+  short_english: "are you sure"
+
+  # This has many apostrophes that differ in Vietnamese
+  possessive_heavy: "The player's team's leader's decision was final."
+
+  # Mixed structure
+  json_in_message: "Config: {\"enabled\":true,\"value\":100}"
+
+  # Length test (should not exceed limits)
+  long_text: "This is a very long message that contains multiple sentences and should test the length validation limits to ensure that translations are not rejected simply because Vietnamese tends to be longer than English which is completely normal and expected behavior for this language pair."
+
+# ============================================================================
+# 12. COMMANDS & PERMISSIONS
+# ============================================================================
+commands:
+  help_text: "Usage: /teleport <player> <location>"
+  permission_denied: "You need permission 'server.admin.ban' to use this"
+  command_list: "Available commands: /spawn, /home, /warp, /tpa"
+
+# ============================================================================
+# 13. NUMBERS & UNITS
+# ============================================================================
+numbers:
+  with_units: "Memory usage: 2.5GB / 8GB (31.25%)"
+  time: "Cooldown: 5m 30s remaining"
+  percentage: "Loading... 75% complete"
+  coordinates: "Location: X=100, Y=64, Z=-250"
+
+# ============================================================================
+# 14. EXTREMELY DIFFICULT COMBINED CASE
+# ============================================================================
+nightmare_test:
+  ultra_complex: |
+    &6&l▬▬▬▬▬▬▬▬▬▬▬ &e&lPLAYER INFO &6&l▬▬▬▬▬▬▬▬▬▬▬
+
+    <gradient:green:blue>%player_name%</gradient>'s Profile
+
+    &7Rank: &b%player_rank% &8[<click:run_command:/rankinfo>?</click>]
+    &7Balance: &a$%vault_eco_balance% &8(&7+%daily_income%/day&8)
+    &7Playtime: %statistic_hours_played%h
+
+    &7Stats:
+    • Kills: &c%player_kills% &8| &7Deaths: &c%player_deaths%
+    • K/D Ratio: %{player_kills / player_deaths}%
+    • Win Rate: %player_winrate%%
+
+    &7Achievements: &e%completed%&7/&e%total% &8[%{completed / total * 100}%%]
+
+    %if_has_permission_vip%
+    &d★ &5&lVIP PERKS ACTIVE &d★
+    - Double XP: %vip_double_xp%
+    - /fly access: &aEnabled
+    %else%
+    &7Upgrade to VIP at: &estore.example.com
+    %endif%
+
+    <hover:show_text:'Click to view full stats'><click:run_command:/stats %player%>&e&l[VIEW DETAILED STATS]</click></hover>
+
+    &8Last login: %player_last_login% | IP: %player_ip%
