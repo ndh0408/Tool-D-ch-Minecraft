@@ -482,7 +482,7 @@ DELIMITER_REC_UNICODE = "⟨REC⟩"
 DELIMITER_UNIT_UNICODE = "⟨UNIT⟩"
 
 # File extensions
-DEFAULT_EXTENSIONS = {".yml", ".yaml", ".json", ".properties", ".lang", ".txt"}
+DEFAULT_EXTENSIONS = {".yml", ".yaml", ".json", ".properties", ".lang", ".txt", ".mcfunction"}
 
 # Validation thresholds
 # FIXED: Increased limits to accommodate Vietnamese translation expansion (typically 1.5-3.5x English)
@@ -705,6 +705,143 @@ def is_vietnamese(text: str) -> bool:
 def is_empty_or_whitespace(text: str) -> bool:
     """Check if text is empty or whitespace-only."""
     return not text or text.isspace()
+
+
+# ============================================================================
+# CONTEXT-AWARE DETECTION (NEW - Smart code vs text detection)
+# ============================================================================
+
+# YAML keys that indicate CODE context (technical values that should NOT be translated)
+CODE_CONTEXT_KEYS = {
+    # Identifiers
+    'id', 'key', 'name', 'type', 'class', 'uuid', 'guid',
+    # Permissions & commands
+    'permission', 'permissions', 'perm', 'perms', 'node', 'command', 'cmd', 'alias', 'aliases',
+    # Technical
+    'namespace', 'plugin', 'world', 'biome', 'enchantment', 'potion', 'effect',
+    # Configuration
+    'enabled', 'disabled', 'mode', 'format', 'pattern', 'regex',
+    # Paths & URLs
+    'path', 'file', 'folder', 'directory', 'url', 'link', 'website',
+    # Database & API
+    'table', 'column', 'field', 'database', 'api', 'endpoint',
+    # Minecraft specific
+    'material', 'item', 'block', 'entity', 'sound', 'particle',
+}
+
+# YAML keys that indicate NATURAL LANGUAGE context (should be translated)
+TEXT_CONTEXT_KEYS = {
+    # User-facing text
+    'message', 'messages', 'msg', 'text', 'description', 'desc',
+    'title', 'subtitle', 'actionbar', 'chat', 'lore', 'tooltip',
+    # Help & info
+    'help', 'usage', 'info', 'about', 'tutorial', 'guide',
+    # Feedback
+    'success', 'error', 'warning', 'fail', 'denied', 'invalid',
+    # Content
+    'content', 'body', 'display', 'label', 'placeholder',
+}
+
+
+def is_code_context(path: str) -> bool:
+    """
+    Check if YAML path indicates code/technical context (should NOT translate).
+
+    Examples:
+        - "permission" → True (code context)
+        - "config.command.teleport" → True (code context)
+        - "messages.welcome" → False (text context)
+        - "descriptions.item_sword" → False (text context)
+    """
+    if not path:
+        return False
+
+    # Split path and check last key (most specific)
+    parts = path.lower().split('.')
+    last_key = parts[-1] if parts else ""
+
+    # Check if last key is in code context list
+    if last_key in CODE_CONTEXT_KEYS:
+        return True
+
+    # Check if any part contains code keywords
+    for part in parts:
+        if part in CODE_CONTEXT_KEYS:
+            return True
+
+    # If explicitly in text context, return False
+    if last_key in TEXT_CONTEXT_KEYS:
+        return False
+
+    return False
+
+
+def looks_like_code(text: str) -> bool:
+    """
+    Check if text looks like code/technical string (should NOT translate).
+
+    Detects:
+        - Permission nodes: "player.admin.teleport"
+        - Namespace IDs: "minecraft:diamond_sword"
+        - Commands: "/spawn", "/teleport"
+        - Paths: "plugins/MyPlugin/config.yml"
+        - Single words without spaces: "teleport", "admin"
+        - Technical patterns: "camelCase", "snake_case", "kebab-case"
+    """
+    if not text or len(text.strip()) == 0:
+        return False
+
+    text = text.strip()
+
+    # Already protected by TokenProtector (has placeholders, color codes, etc.)
+    if any(char in text for char in ['%', '{', '}', '&', '§']):
+        return False  # Let normal protection handle it
+
+    # Permission node pattern: "group.subgroup.permission"
+    if re.match(r'^[a-z][a-z0-9]*(\.[a-z][a-z0-9_-]*){2,}$', text, re.IGNORECASE):
+        return True
+
+    # Namespace ID: "minecraft:item", "myserver:custom_item"
+    if re.match(r'^[a-z0-9_-]+:[a-z0-9_/-]+$', text, re.IGNORECASE):
+        return True
+
+    # Command pattern: starts with /
+    if text.startswith('/'):
+        return True
+
+    # File path pattern: contains / or \ with extension
+    if ('/' in text or '\\' in text) and '.' in text:
+        return True
+
+    # Single technical word (no spaces, contains underscores or hyphens)
+    if ' ' not in text and len(text) > 3:
+        # Has underscores or hyphens (technical naming)
+        if '_' in text or '-' in text:
+            return True
+
+        # camelCase or PascalCase (but not all caps)
+        if re.search(r'[a-z][A-Z]', text):
+            return True
+
+    # All uppercase acronym (but not just "I" or "A")
+    if text.isupper() and len(text) >= 3 and text.isalpha():
+        return True
+
+    # Looks like natural language (has common words, articles, verbs)
+    natural_indicators = ['the', 'a', 'an', 'is', 'are', 'you', 'your', 'this', 'that',
+                          'have', 'has', 'will', 'can', 'please', 'welcome', 'hello']
+    words = text.lower().split()
+    if any(word in natural_indicators for word in words):
+        return False  # Definitely natural language
+
+    # Short text without spaces (likely technical)
+    if ' ' not in text and len(text) <= 15:
+        # But not if it's just one common English word
+        common_words = ['yes', 'no', 'true', 'false', 'enabled', 'disabled', 'on', 'off']
+        if text.lower() not in common_words:
+            return True
+
+    return False
 
 
 def load_glossary(glossary_path: Optional[Path]) -> Dict[str, str]:
@@ -1110,15 +1247,224 @@ class ModelLoader:
 
 
 # ============================================================================
+# TRANSLATION MEMORY (Cache system)
+# ============================================================================
+
+import sqlite3
+import hashlib
+from datetime import datetime
+
+
+class TranslationMemory:
+    """
+    SQLite-based translation cache to avoid re-translating identical text.
+
+    Benefits:
+    - Speeds up translation (cache hit = instant)
+    - Ensures consistency across files
+    - Persists between runs
+    """
+
+    def __init__(self, db_path: Optional[Path] = None, enabled: bool = True):
+        self.enabled = enabled
+        if not enabled:
+            self.db = None
+            return
+
+        # Default path: ~/.cache/minecraft_translator/tm.db
+        if db_path is None:
+            cache_dir = Path.home() / ".cache" / "minecraft_translator"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            db_path = cache_dir / "tm.db"
+
+        self.db_path = db_path
+        self.db = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.db.execute("PRAGMA journal_mode=WAL")  # Better concurrency
+        self.create_table()
+
+        # Statistics
+        self.hits = 0
+        self.misses = 0
+        self.total_queries = 0
+
+    def create_table(self):
+        """Create translation memory table if not exists."""
+        if not self.db:
+            return
+
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS translations (
+                source_hash TEXT PRIMARY KEY,
+                source_text TEXT NOT NULL,
+                target_text TEXT NOT NULL,
+                context TEXT,
+                model_name TEXT,
+                created_at INTEGER,
+                last_used INTEGER,
+                use_count INTEGER DEFAULT 1
+            )
+        """)
+
+        # Index for faster lookups
+        self.db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_context
+            ON translations(context)
+        """)
+
+        self.db.commit()
+
+    def _hash_source(self, source: str, context: str = None) -> str:
+        """Generate hash for source text + context."""
+        key = f"{source}|{context or ''}"
+        return hashlib.sha256(key.encode('utf-8')).hexdigest()
+
+    def get(self, source: str, context: str = None, model_name: str = None) -> Optional[str]:
+        """
+        Lookup translation from cache.
+
+        Args:
+            source: Source text
+            context: YAML path or file context
+            model_name: Model name (optional filter)
+
+        Returns:
+            Cached translation or None
+        """
+        if not self.enabled or not self.db:
+            return None
+
+        self.total_queries += 1
+        source_hash = self._hash_source(source, context)
+
+        try:
+            cursor = self.db.execute("""
+                SELECT target_text, use_count
+                FROM translations
+                WHERE source_hash = ?
+                AND (model_name = ? OR ? IS NULL)
+                LIMIT 1
+            """, (source_hash, model_name, model_name))
+
+            row = cursor.fetchone()
+            if row:
+                target_text, use_count = row
+
+                # Update statistics
+                self.db.execute("""
+                    UPDATE translations
+                    SET last_used = ?, use_count = ?
+                    WHERE source_hash = ?
+                """, (int(datetime.now().timestamp()), use_count + 1, source_hash))
+                self.db.commit()
+
+                self.hits += 1
+                return target_text
+
+            self.misses += 1
+            return None
+
+        except Exception as e:
+            print(f"⚠️ TM lookup error: {e}")
+            return None
+
+    def put(self, source: str, target: str, context: str = None, model_name: str = None):
+        """
+        Store translation in cache.
+
+        Args:
+            source: Source text
+            target: Translated text
+            context: YAML path or file context
+            model_name: Model name used
+        """
+        if not self.enabled or not self.db:
+            return
+
+        source_hash = self._hash_source(source, context)
+        now = int(datetime.now().timestamp())
+
+        try:
+            self.db.execute("""
+                INSERT OR REPLACE INTO translations
+                (source_hash, source_text, target_text, context, model_name, created_at, last_used, use_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT use_count FROM translations WHERE source_hash = ?), 1))
+            """, (source_hash, source, target, context, model_name, now, now, source_hash))
+            self.db.commit()
+
+        except Exception as e:
+            print(f"⚠️ TM store error: {e}")
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        if not self.enabled or not self.db:
+            return {
+                "enabled": False,
+                "hits": 0,
+                "misses": 0,
+                "total": 0,
+                "hit_rate": 0.0,
+                "cache_size": 0
+            }
+
+        try:
+            cursor = self.db.execute("SELECT COUNT(*) FROM translations")
+            cache_size = cursor.fetchone()[0]
+
+            hit_rate = self.hits / self.total_queries if self.total_queries > 0 else 0.0
+
+            return {
+                "enabled": True,
+                "hits": self.hits,
+                "misses": self.misses,
+                "total": self.total_queries,
+                "hit_rate": hit_rate,
+                "cache_size": cache_size,
+                "db_path": str(self.db_path)
+            }
+
+        except Exception:
+            return {
+                "enabled": True,
+                "hits": self.hits,
+                "misses": self.misses,
+                "total": self.total_queries,
+                "hit_rate": 0.0,
+                "cache_size": 0
+            }
+
+    def clear(self):
+        """Clear all cached translations."""
+        if not self.enabled or not self.db:
+            return
+
+        try:
+            self.db.execute("DELETE FROM translations")
+            self.db.commit()
+            print("✅ Translation memory cleared")
+        except Exception as e:
+            print(f"⚠️ Failed to clear TM: {e}")
+
+    def close(self):
+        """Close database connection."""
+        if self.db:
+            self.db.close()
+
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.close()
+
+
+# ============================================================================
 # TRANSLATOR
 # ============================================================================
 
 class Translator:
-    """Main translation engine."""
+    """Main translation engine with Translation Memory cache."""
 
     def __init__(self, model_loader: ModelLoader, batch_size: int,
                  low_memory: bool = False, glossary: Optional[Dict[str, str]] = None,
-                 force: bool = False):
+                 force: bool = False, tm: Optional[TranslationMemory] = None):
         self.model_loader = model_loader
         self.batch_size = batch_size
         self.low_memory = low_memory
@@ -1126,6 +1472,7 @@ class Translator:
         self.force = force
         self.protector = TokenProtector()
         self.on_translation = None  # Callback for each translation
+        self.tm = tm  # Translation Memory cache
 
         # Choose delimiters
         self.delim_rec = DELIMITER_REC
@@ -1288,8 +1635,8 @@ class Translator:
 
         return all_results
 
-    def translate_single(self, text: str) -> Tuple[str, str]:
-        """Translate a single text with protection and validation.
+    def translate_single(self, text: str, context: str = None) -> Tuple[str, str]:
+        """Translate a single text with protection, validation, and cache.
 
         Returns:
             (translated_text, reason_if_failed)
@@ -1298,6 +1645,13 @@ class Translator:
         skip, reason = self.should_skip(text)
         if skip:
             return text, reason
+
+        # CACHE LOOKUP: Check Translation Memory first
+        if self.tm and self.tm.enabled:
+            cached = self.tm.get(text, context=context, model_name=self.model_loader.actual_model_name)
+            if cached:
+                # Cache hit! Return immediately
+                return cached, ""
 
         # Language detection - skip non-English/Vietnamese text
         if LANGDETECT_AVAILABLE:
@@ -1391,6 +1745,10 @@ class Translator:
                 print(f"   Translated: {encoded[:100]}...")
                 # FIXED: Don't reject - just log warning
                 # return text, f"structure_invalid: {struct_error}"
+
+        # CACHE STORE: Save successful translation to Translation Memory
+        if self.tm and self.tm.enabled:
+            self.tm.put(text, encoded, context=context, model_name=self.model_loader.actual_model_name)
 
         return encoded, ""
 
@@ -1679,20 +2037,28 @@ class YAMLHandler(FileHandler):
                         pass  # Ignore if still can't delete
 
     def translate_value(self, value: Any, path: str) -> Tuple[Any, bool, str]:
-        """Translate a single value.
+        """Translate a single value with context-aware detection.
 
         Returns:
             (translated_value, changed, reason)
         """
+        # CONTEXT-AWARE CHECK: Skip if YAML key indicates code context
+        if is_code_context(path):
+            return value, False, f"code_context: {path}"
+
         # BUGFIX: Check literal/folded scalars BEFORE str
         # (LiteralScalarString/FoldedScalarString inherit from str)
         if isinstance(value, (LiteralScalarString, FoldedScalarString)):
             original_text = str(value)
 
+            # CONTEXT-AWARE CHECK: Skip if text looks like code
+            if looks_like_code(original_text):
+                return value, False, f"looks_like_code: {original_text[:50]}"
+
             # Check if should skip
             if len(original_text) <= YAML_MULTILINE_THRESHOLD:
                 # Translate as single block
-                translated, reason = self.translator.translate_single(original_text)
+                translated, reason = self.translator.translate_single(original_text, context=path)
                 if reason:
                     return value, False, reason
 
@@ -1715,7 +2081,7 @@ class YAMLHandler(FileHandler):
                         continue
 
                     # BUGFIX: Removed unused prev_line variable
-                    translated, reason = self.translator.translate_single(line)
+                    translated, reason = self.translator.translate_single(line, context=f"{path}[line]")
                     translated_lines.append(translated if not reason else line)
 
                 translated_text = "\n".join(translated_lines)
@@ -1731,7 +2097,11 @@ class YAMLHandler(FileHandler):
 
         # Handle regular scalar strings (AFTER checking LiteralScalarString/FoldedScalarString)
         if isinstance(value, str):
-            translated, reason = self.translator.translate_single(value)
+            # CONTEXT-AWARE CHECK: Skip if text looks like code
+            if looks_like_code(value):
+                return value, False, f"looks_like_code: {value[:50]}"
+
+            translated, reason = self.translator.translate_single(value, context=path)
             changed = translated != value
             return translated, changed, reason
 
@@ -1855,7 +2225,7 @@ class JSONHandler(FileHandler):
                 if isinstance(value, (dict, list)):
                     changes_count += self.translate_recursive(value, current_path)
                 elif isinstance(value, str):
-                    translated, reason = self.translator.translate_single(value)
+                    translated, reason = self.translator.translate_single(value, context=current_path)
                     if translated != value:
                         data[key] = translated
                         changes_count += 1
@@ -1877,7 +2247,7 @@ class JSONHandler(FileHandler):
                 if isinstance(item, (dict, list)):
                     changes_count += self.translate_recursive(item, current_path)
                 elif isinstance(item, str):
-                    translated, reason = self.translator.translate_single(item)
+                    translated, reason = self.translator.translate_single(item, context=current_path)
                     if translated != item:
                         data[i] = translated
                         changes_count += 1
@@ -1976,7 +2346,7 @@ class PropertiesHandler(FileHandler):
                         continue
 
                 # Translate value only
-                translated, reason = self.translator.translate_single(value)
+                translated, reason = self.translator.translate_single(value, context=key.strip())
                 if translated != value:
                     # BUGFIX: Preserve full separator with spacing
                     new_line = f"{key}{full_separator}{translated}\n"
@@ -2005,38 +2375,203 @@ class PropertiesHandler(FileHandler):
 
 
 class TextHandler(FileHandler):
-    """Handler for plain .txt files."""
+    """Handler for plain .txt files - translates line by line."""
 
-    def read_file(self, file_path: Path) -> Tuple[str, str]:
+    def read_file(self, file_path: Path) -> Tuple[List[str], str]:
         encoding = detect_encoding(file_path)
         with open(file_path, "r", encoding=encoding) as f:
-            content = f.read()
-        return content, encoding
+            lines = f.readlines()
+        return lines, encoding
 
-    def write_file(self, file_path: Path, content: str, encoding: str):
+    def write_file(self, file_path: Path, lines: List[str], encoding: str):
+        content = "".join(lines)
         atomic_write(file_path, content, encoding, base_dir=self.base_dir)
 
     def translate_file(self, file_path: Path) -> List[Dict[str, Any]]:
         self.changes = []
 
         try:
-            content, encoding = self.read_file(file_path)
+            lines, encoding = self.read_file(file_path)
+            translated_lines = []
 
-            # Translate entire content (may chunk if too long)
-            translated, reason = self.translator.translate_long_text(content)
+            for line_num, line in enumerate(lines, 1):
+                # Skip empty lines and comments
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    translated_lines.append(line)
+                    continue
 
-            if translated != content:
-                self.changes.append({
-                    "key_path": "<file>",
-                    "original": content[:100] + "..." if len(content) > 100 else content,
-                    "translated": translated[:100] + "..." if len(translated) > 100 else translated,
-                    "changed": True,
-                    "reason": reason,
-                })
+                # Translate the line content, preserving newline
+                has_newline = line.endswith("\n")
+                text_to_translate = line.rstrip("\n\r")
 
-                if not self.dry_run:
-                    create_backup(file_path)
-                    self.write_file(file_path, translated, encoding)
+                translated, reason = self.translator.translate_single(
+                    text_to_translate,
+                    context=f"{file_path.name}:line{line_num}"
+                )
+
+                # Restore newline if original had it
+                if has_newline:
+                    translated += "\n"
+
+                translated_lines.append(translated)
+
+                if translated != line:
+                    self.changes.append({
+                        "key_path": f"line {line_num}",
+                        "original": text_to_translate[:100],
+                        "translated": translated.rstrip("\n\r")[:100],
+                        "changed": True,
+                        "reason": reason,
+                    })
+
+            if self.changes and not self.dry_run:
+                create_backup(file_path)
+                self.write_file(file_path, translated_lines, encoding)
+
+            return self.changes
+
+        except Exception as e:
+            print(f"ERROR processing {file_path}: {e}")
+            return []
+
+
+class McfunctionHandler(FileHandler):
+    """Handler for .mcfunction files - translates JSON text components in commands."""
+
+    def read_file(self, file_path: Path) -> Tuple[List[str], str]:
+        encoding = detect_encoding(file_path)
+        with open(file_path, "r", encoding=encoding) as f:
+            lines = f.readlines()
+        return lines, encoding
+
+    def write_file(self, file_path: Path, lines: List[str], encoding: str):
+        content = "".join(lines)
+        atomic_write(file_path, content, encoding, base_dir=self.base_dir)
+
+    def extract_json_from_command(self, line: str) -> List[Tuple[str, int, int]]:
+        """Extract JSON components from Minecraft commands.
+
+        Returns list of (json_str, start_pos, end_pos) tuples.
+        Looks for patterns like:
+        - tellraw @a {"text":"..."}
+        - title @a title {"text":"..."}
+        - tellraw @a [{"text":"..."},{"text":"..."}]
+        """
+        import re
+        json_patterns = []
+
+        # Find JSON objects/arrays in the command
+        # Look for { or [ that start JSON
+        stack = []
+        start = None
+
+        for i, char in enumerate(line):
+            if char in ['{', '[']:
+                if not stack:
+                    start = i
+                stack.append(char)
+            elif char in ['}', ']']:
+                if stack:
+                    expected = '{' if char == '}' else '['
+                    if stack[-1] == expected:
+                        stack.pop()
+                        if not stack and start is not None:
+                            # Found complete JSON
+                            json_str = line[start:i+1]
+                            json_patterns.append((json_str, start, i+1))
+                            start = None
+
+        return json_patterns
+
+    def translate_json_component(self, json_str: str) -> str:
+        """Translate text in JSON text component."""
+        import json
+        try:
+            data = json.loads(json_str)
+            self._translate_recursive(data)
+            return json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+        except:
+            # If JSON parsing fails, return original
+            return json_str
+
+    def _translate_recursive(self, obj):
+        """Recursively translate 'text' fields in JSON component."""
+        if isinstance(obj, dict):
+            # Translate 'text' field if exists
+            if 'text' in obj and isinstance(obj['text'], str):
+                text = obj['text']
+                # Don't translate if it looks like a selector or empty
+                if text and not text.startswith('@') and text.strip():
+                    translated, _ = self.translator.translate_single(
+                        text,
+                        context="mcfunction:json:text"
+                    )
+                    obj['text'] = translated
+
+            # Recurse into nested objects
+            for key, value in obj.items():
+                if isinstance(value, (dict, list)):
+                    self._translate_recursive(value)
+
+        elif isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, (dict, list)):
+                    self._translate_recursive(item)
+
+    def translate_file(self, file_path: Path) -> List[Dict[str, Any]]:
+        self.changes = []
+
+        try:
+            lines, encoding = self.read_file(file_path)
+            translated_lines = []
+
+            for line_num, line in enumerate(lines, 1):
+                # Skip empty lines and comments
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    translated_lines.append(line)
+                    continue
+
+                # Find JSON components in the command
+                json_components = self.extract_json_from_command(line)
+
+                if not json_components:
+                    # No JSON found, keep line as-is
+                    translated_lines.append(line)
+                    continue
+
+                # Translate each JSON component
+                translated_line = line
+                offset = 0
+
+                for json_str, start, end in json_components:
+                    translated_json = self.translate_json_component(json_str)
+
+                    if translated_json != json_str:
+                        # Replace in line
+                        actual_start = start + offset
+                        actual_end = end + offset
+                        translated_line = (
+                            translated_line[:actual_start] +
+                            translated_json +
+                            translated_line[actual_end:]
+                        )
+                        offset += len(translated_json) - len(json_str)
+
+                        self.changes.append({
+                            "key_path": f"line {line_num}",
+                            "original": json_str[:100],
+                            "translated": translated_json[:100],
+                            "changed": True,
+                            "reason": "",
+                        })
+
+                translated_lines.append(translated_line)
+
+            if self.changes and not self.dry_run:
+                create_backup(file_path)
+                self.write_file(file_path, translated_lines, encoding)
 
             return self.changes
 
@@ -2094,6 +2629,14 @@ class InPlaceTranslator:
         if glossary:
             print(f"Loaded glossary with {len(glossary)} terms")
 
+        # Initialize Translation Memory (cache)
+        tm_enabled = not self.args.no_cache
+        tm = TranslationMemory(enabled=tm_enabled) if tm_enabled else None
+        if tm_enabled:
+            stats = tm.get_stats()
+            print(f"Translation Memory enabled: {stats['cache_size']} cached translations")
+            print(f"  Cache database: {stats.get('db_path', 'N/A')}")
+
         # Create translator
         self.translator = Translator(
             model_loader=self.model_loader,
@@ -2101,6 +2644,7 @@ class InPlaceTranslator:
             low_memory=self.args.low_memory,
             glossary=glossary,
             force=self.args.force,
+            tm=tm,
         )
 
         # Propagate callbacks to translator
@@ -2154,7 +2698,48 @@ class InPlaceTranslator:
 
         # Filter out .bak files
         files = [f for f in files if not f.name.endswith(".bak")]
+
+        # Apply include/exclude patterns if specified
+        files = self._apply_path_filters(files)
+
         return sorted(files)
+
+    def _apply_path_filters(self, files: List[Path]) -> List[Path]:
+        """Apply include/exclude pattern filters to file list."""
+        from fnmatch import fnmatch
+
+        # Parse include patterns
+        include_patterns = []
+        if hasattr(self.args, 'include') and self.args.include:
+            include_patterns = [p.strip() for p in self.args.include.split(",")]
+
+        # Parse exclude patterns
+        exclude_patterns = []
+        if hasattr(self.args, 'exclude') and self.args.exclude:
+            exclude_patterns = [p.strip() for p in self.args.exclude.split(",")]
+
+        filtered_files = []
+        for file_path in files:
+            # Get relative path from base folder for pattern matching
+            try:
+                rel_path = file_path.relative_to(self.folder)
+                rel_path_str = str(rel_path).replace("\\", "/")  # Normalize to forward slashes
+            except ValueError:
+                rel_path_str = str(file_path).replace("\\", "/")
+
+            # Check include patterns (if specified, file must match at least one)
+            if include_patterns:
+                if not any(fnmatch(rel_path_str, pattern) for pattern in include_patterns):
+                    continue
+
+            # Check exclude patterns (if matches any, skip file)
+            if exclude_patterns:
+                if any(fnmatch(rel_path_str, pattern) for pattern in exclude_patterns):
+                    continue
+
+            filtered_files.append(file_path)
+
+        return filtered_files
 
     def get_handler(self, file_path: Path) -> Optional[FileHandler]:
         """Get appropriate handler for file."""
@@ -2168,6 +2753,8 @@ class InPlaceTranslator:
             return PropertiesHandler(self.translator, self.args.dry_run, base_dir=self.folder)
         elif ext == ".txt":
             return TextHandler(self.translator, self.args.dry_run, base_dir=self.folder)
+        elif ext == ".mcfunction":
+            return McfunctionHandler(self.translator, self.args.dry_run, base_dir=self.folder)
 
         return None
 
@@ -2321,6 +2908,18 @@ class InPlaceTranslator:
             print("\n[WARN] DRY-RUN MODE: No files will be modified")
 
         self.process_files()
+
+        # Print Translation Memory statistics
+        if self.translator and self.translator.tm:
+            stats = self.translator.tm.get_stats()
+            if stats['total'] > 0:
+                print("\n" + "="*60)
+                print("TRANSLATION MEMORY STATISTICS")
+                print("="*60)
+                print(f"Cache hits:   {stats['hits']}/{stats['total']} ({stats['hit_rate']:.1%})")
+                print(f"Cache size:   {stats['cache_size']} translations")
+                print(f"Time saved:   ~{stats['hits'] * 2:.0f}s (estimated)")
+                print(f"Database:     {stats.get('db_path', 'N/A')}")
 
         print("\n" + "="*60)
         print("COMPLETE")
@@ -4861,7 +5460,9 @@ Examples:
     parser.add_argument("--low-memory", action="store_true", help="Enable low-memory optimizations")
     parser.add_argument("--fallback-model", choices=list(MODEL_CONFIGS.keys()),
                         help="Fallback model if primary fails")
-    parser.add_argument("--ext", help="Comma-separated file extensions (default: yml,yaml,json,properties,lang,txt)")
+    parser.add_argument("--ext", help="Comma-separated file extensions (default: yml,yaml,json,properties,lang,txt,mcfunction)")
+    parser.add_argument("--include", help="Include patterns (comma-separated, e.g., 'plugins/**,datapacks/**')")
+    parser.add_argument("--exclude", help="Exclude patterns (comma-separated, e.g., '*.bak,backup/**')")
     parser.add_argument("--force", action="store_true", help="Translate even if Vietnamese detected")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without writing")
     parser.add_argument("--rollback", action="store_true", help="Restore all .bak files")
@@ -4870,12 +5471,35 @@ Examples:
     parser.add_argument("--self-test", action="store_true", help="Run internal validation tests")
     parser.add_argument("--max-memory", help='Cap memory usage (e.g., "cuda:0=7GiB,cpu=30GiB")')
     parser.add_argument("--glossary", help="Path to glossary JSON file (en->vi)")
+    parser.add_argument("--no-cache", action="store_true", help="Disable translation memory cache")
+    parser.add_argument("--clear-cache", action="store_true", help="Clear translation memory cache and exit")
+    parser.add_argument("--cache-stats", action="store_true", help="Show cache statistics and exit")
 
     args = parser.parse_args()
 
     # Self-test mode
     if args.self_test:
         run_self_tests()
+        return
+
+    # Cache management modes
+    if args.clear_cache:
+        tm = TranslationMemory()
+        tm.clear()
+        stats = tm.get_stats()
+        print(f"📊 Cache cleared. Database: {stats.get('db_path', 'N/A')}")
+        return
+
+    if args.cache_stats:
+        tm = TranslationMemory()
+        stats = tm.get_stats()
+        print("\n📊 TRANSLATION MEMORY STATISTICS")
+        print("=" * 60)
+        print(f"Status:     {'✅ Enabled' if stats['enabled'] else '❌ Disabled'}")
+        print(f"Cache size: {stats['cache_size']} translations")
+        print(f"Hit rate:   {stats['hit_rate']:.1%} ({stats['hits']} hits / {stats['total']} queries)")
+        print(f"Database:   {stats.get('db_path', 'N/A')}")
+        print("=" * 60)
         return
 
     # Validate folder requirement
